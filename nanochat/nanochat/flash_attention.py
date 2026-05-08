@@ -71,8 +71,6 @@ USE_FA3 = _resolve_use_fa3()
 # =============================================================================
 # SDPA helpers
 # =============================================================================
-
-
 def _sdpa_attention(q, k, v, window_size, enable_gqa):
     """
     SDPA attention with sliding window support.
@@ -86,31 +84,18 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
         return F.scaled_dot_product_attention(
             q, k, v, is_causal=True, enable_gqa=enable_gqa
         )
-    # Single token generation
-    if Tq == 1:
-        if window >= 0 and window < Tk:
-            # window is "left" tokens we need to include (window + 1) keys total
-            start = max(0, Tk - (window + 1))
-            k = k[:, :, start:, :]
-            v = v[:, :, start:, :]
-        target_dtype = k.dtype  # use key's dtype as reference
-        q = q.to(target_dtype)
-        v = v.to(target_dtype)
-        return F.scaled_dot_product_attention(
-            q, k, v, is_causal=True, enable_gqa=enable_gqa
-        )
 
     # Single token generation
     if Tq == 1:
         if window >= 0 and window < Tk:
-            # window is "left" tokens we need to include (window + 1) keys total
             start = max(0, Tk - (window + 1))
             k = k[:, :, start:, :]
             v = v[:, :, start:, :]
+        # Cast q to match k/v dtype (needed on pre-Ampere GPUs using fp32 compute)
+        q = q.to(k.dtype)
         return F.scaled_dot_product_attention(
             q, k, v, is_causal=False, enable_gqa=enable_gqa
         )
-
     # Need explicit mask for sliding window/chunk inference
     device = q.device
     # For chunk inference (Tq != Tk), is_causal is not aligned to cache position => build an explicit bool mask
@@ -121,7 +106,7 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
     # sliding window (left)
     if window >= 0 and window < Tk:
         mask = mask & ((row_idx - col_idx) <= window)
-
+    q = q.to(k.dtype)  # guard against fp32/bf16 mismatch on pre-Ampere
     return F.scaled_dot_product_attention(
         q, k, v, attn_mask=mask, enable_gqa=enable_gqa
     )

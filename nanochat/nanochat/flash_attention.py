@@ -76,6 +76,10 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
     SDPA attention with sliding window support.
     q, k, v are (B, H, T, D) format.
     """
+    # Ensure consistent dtype — on pre-Ampere (fp32 compute), q may be float32
+    # while k/v from the KV cache are bfloat16. Always cast to k's dtype.
+    q = q.to(k.dtype)
+
     Tq = q.size(2)
     Tk = k.size(2)
     window = window_size[0]
@@ -84,29 +88,22 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
         return F.scaled_dot_product_attention(
             q, k, v, is_causal=True, enable_gqa=enable_gqa
         )
-
     # Single token generation
     if Tq == 1:
         if window >= 0 and window < Tk:
             start = max(0, Tk - (window + 1))
             k = k[:, :, start:, :]
             v = v[:, :, start:, :]
-        # Cast q to match k/v dtype (needed on pre-Ampere GPUs using fp32 compute)
-        q = q.to(k.dtype)
         return F.scaled_dot_product_attention(
             q, k, v, is_causal=False, enable_gqa=enable_gqa
         )
-    # Need explicit mask for sliding window/chunk inference
+    # Chunk inference — explicit causal mask
     device = q.device
-    # For chunk inference (Tq != Tk), is_causal is not aligned to cache position => build an explicit bool mask
     row_idx = (Tk - Tq) + torch.arange(Tq, device=device).unsqueeze(1)
     col_idx = torch.arange(Tk, device=device).unsqueeze(0)
     mask = col_idx <= row_idx
-
-    # sliding window (left)
     if window >= 0 and window < Tk:
         mask = mask & ((row_idx - col_idx) <= window)
-    q = q.to(k.dtype)  # guard against fp32/bf16 mismatch on pre-Ampere
     return F.scaled_dot_product_attention(
         q, k, v, attn_mask=mask, enable_gqa=enable_gqa
     )
